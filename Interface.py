@@ -4,6 +4,8 @@ import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
 import requests
+import difflib
+import logging
 
 # ======================================
 #  FUNÇÃO: CARREGAMENTO DOS DADOS (CACHE)
@@ -55,7 +57,7 @@ def build_model(filmes_pivot):
 
 
 # ======================================
-#  FUNÇÃO: BUSCA NA API IMDB
+#  FUNÇÃO: BUSCA NA API IMDB (EXTRAI POSTER)
 # ======================================
 def get_imdb_data(titulo):
     try:
@@ -121,6 +123,48 @@ def get_imdb_data(titulo):
         st.error(f"Erro ao buscar dados do IMDb: {e}")
         return None
 
+
+# ======================================
+#  FUNÇÃO: BUSCA CASE-INSENSITIVE / SUBSTRING / FUZZY
+# ======================================
+def find_best_title_match(query, titles, filmes_df):
+    """
+    Retorna o título da lista 'titles' que melhor corresponde a 'query',
+    ignorando case. Estratégia:
+     - igualdade exata (case-insensitive)
+     - títulos que contenham a query (case-insensitive), escolhendo o mais popular por QT_AVALIACOES
+     - correspondência aproximada via difflib como fallback
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+    q_low = q.lower()
+
+    # 1) igualdade exata (case-insensitive)
+    for t in titles:
+        if t.lower() == q_low:
+            return t
+
+    # 2) contains (case-insensitive)
+    contains = [t for t in titles if q_low in t.lower()]
+    if contains:
+        # se tivermos o DataFrame filmes com coluna 'TITULO' e 'QT_AVALIACOES', escolhe o mais popular
+        if 'TITULO' in filmes_df.columns and 'QT_AVALIACOES' in filmes_df.columns:
+            subset = filmes_df[filmes_df['TITULO'].isin(contains)]
+            if not subset.empty:
+                best = subset.sort_values('QT_AVALIACOES', ascending=False).iloc[0]['TITULO']
+                return best
+        # senão, retorna o primeiro encontrado
+        return contains[0]
+
+    # 3) correspondência aproximada (fuzzy) como fallback
+    close = difflib.get_close_matches(q, titles, n=1, cutoff=0.6)
+    if close:
+        return close[0]
+
+    return None
+
+
 # ======================================
 #  INICIALIZAÇÃO
 # ======================================
@@ -143,31 +187,36 @@ nome_filme_final = chosen_from_list if chosen_from_list else nome_filme.strip()
 if st.button("Buscar recomendações"):
     if not nome_filme_final:
         st.warning("Por favor digite ou escolha um filme antes de buscar.")
-    elif nome_filme_final not in filmes_pivot.index:
-        st.error(f"O filme '{nome_filme_final}' não foi encontrado na base de dados.")
     else:
-        try:
-            query_vec = filmes_pivot.filter(items=[nome_filme_final], axis=0).values.reshape(1, -1)
-            distances, sugestions = modelo.kneighbors(query_vec, n_neighbors=6)
-            recommended = filmes_pivot.index[sugestions[0][1:]]
+        # Encontra a melhor correspondência ignorando case
+        best_match = find_best_title_match(nome_filme_final, titles, filmes)
+        if not best_match:
+            st.error(f"O filme '{nome_filme_final}' não foi encontrado na base de dados.")
+        else:
+            if best_match != nome_filme_final:
+                st.info(f"Usando correspondência encontrada: '{best_match}'")
 
-            st.subheader("Filmes recomendados:")
-            for i, movie in enumerate(recommended, start=1):
-                print(movie)
-                info = get_imdb_data(movie)
+            try:
+                query_vec = filmes_pivot.filter(items=[best_match], axis=0).values.reshape(1, -1)
+                distances, sugestions = modelo.kneighbors(query_vec, n_neighbors=6)
+                recommended = filmes_pivot.index[sugestions[0][1:]]
 
-                if info:
-                    col1, col2 = st.columns([1, 3])
-                    with col1:
-                        if info.get("poster"):
-                            st.image(info["poster"], width=150)
-                        else:
-                            st.write("📷 Sem imagem")
-                    with col2:
-                        st.markdown(f"### {i}. {info['title']} ({info.get('year', '')})")
-                        st.caption(info.get("plot", ""))
-                else:
-                    st.markdown(f"### {i}. {movie}")
+                st.subheader("Filmes recomendados:")
+                for i, movie in enumerate(recommended, start=1):
+                    info = get_imdb_data(movie)
 
-        except Exception as e:
-            st.error(f"Erro ao buscar recomendações: {e}")
+                    if info:
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            if info.get("poster"):
+                                st.image(info["poster"], width=150)
+                            else:
+                                st.write("📷 Sem imagem")
+                        with col2:
+                            st.markdown(f"### {i}. {info['title']} ({info.get('year', '')})")
+                            st.caption(info.get("plot", ""))
+                    else:
+                        st.markdown(f"### {i}. {movie}")
+
+            except Exception as e:
+                st.error(f"Erro ao buscar recomendações: {e}")
