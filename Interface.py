@@ -60,31 +60,66 @@ def build_model(filmes_pivot):
 def get_imdb_data(titulo):
     try:
         titulo_enc = requests.utils.requote_uri(titulo)
-        # url = f"https://imdbapi.dev/api?title={titulo_enc}"
-        # titulo_enc = requests.utils.requote_uri()
-        url = f"https://api.imdbapi.dev/titles/{titulo_enc}"
-
+        url = f"https://api.imdbapi.dev/search/titles?query={titulo_enc}"
         resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
         data = resp.json()
 
-        # a API imdbapi.dev retorna uma lista — vamos pegar o primeiro resultado
-        if isinstance(data, list) and len(data) > 0:
-            movie = data[0]
+        # Normaliza para lista de títulos
+        if isinstance(data, dict) and isinstance(data.get("titles"), list):
+            titles = data["titles"]
+        elif isinstance(data, list):
+            titles = data
+        elif isinstance(data, dict):
+            titles = [data]
         else:
-            movie = data
+            titles = []
 
-        if movie.get("title"):
-            return {
-                "title": movie.get("title"),
-                "year": movie.get("year"),
-                "poster": movie.get("poster"),
-                "plot": movie.get("plot")
-            }
-        return None
+        # Escolhe o primeiro item com primaryImage (se existir), senão o primeiro item
+        movie = None
+        for item in titles:
+            if not isinstance(item, dict):
+                continue
+            primary = item.get("primaryImage")
+            if isinstance(primary, dict) and primary.get("url"):
+                movie = item
+                break
+        if movie is None and titles:
+            movie = titles[0]
+        if movie is None:
+            return None
+
+        # Extrai a URL do poster (primaryImage.url preferencialmente)
+        poster = None
+        primary = movie.get("primaryImage")
+        if isinstance(primary, dict):
+            poster = primary.get("url")
+
+        # campos alternativos caso não exista primaryImage
+        if not poster:
+            for key in ("poster", "image", "poster_url", "posterLink", "image_url"):
+                val = movie.get(key)
+                if isinstance(val, dict):
+                    poster = val.get("url")
+                elif isinstance(val, str) and val.strip():
+                    poster = val.strip()
+                if poster:
+                    break
+
+        # Title / year / plot - adaptações aos nomes que a API pode devolver
+        title = movie.get("primaryTitle") or movie.get("title") or movie.get("originalTitle") or titulo
+        year = movie.get("startYear") or movie.get("year")
+        plot = movie.get("plot") or movie.get("summary") or "Sem descrição disponível."
+
+        return {
+            "title": title,
+            "year": year,
+            "poster": poster,
+            "plot": plot
+        }
     except Exception as e:
         st.error(f"Erro ao buscar dados do IMDb: {e}")
         return None
-
 
 # ======================================
 #  INICIALIZAÇÃO
