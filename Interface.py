@@ -57,7 +57,81 @@ def build_model(filmes_pivot):
 
 
 # ======================================
-#  FUNÇÃO: BUSCA NA API IMDB (EXTRAI POSTER E RATING)
+#  HELPERS PARA EXTRACAO DE PLOT E POSTER
+# ======================================
+def _extract_plot_from_obj(obj):
+    """
+    Tenta extrair texto de plot/summary/plots/plotSummary de um objeto retornado pela API.
+    Retorna string ou None.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # 1) plot direto (string)
+    p = obj.get('plot')
+    if isinstance(p, str) and p.strip():
+        return p.strip()
+
+    # 2) summary / description / overview
+    for key in ('summary', 'description', 'overview'):
+        v = obj.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+
+    # 3) plots: lista com dicts ou strings
+    plots = obj.get('plots') or obj.get('plotText') or obj.get('plotTexts')
+    if isinstance(plots, list) and len(plots) > 0:
+        first = plots[0]
+        if isinstance(first, str) and first.strip():
+            return first.strip()
+        if isinstance(first, dict):
+            for candidate in ('text', 'plainText', 'plotText', 'summary', 'plot'):
+                tv = first.get(candidate)
+                if isinstance(tv, str) and tv.strip():
+                    return tv.strip()
+
+    # 4) plotSummary: possivel dict com 'text' ou 'summaryText'
+    ps = obj.get('plotSummary') or obj.get('plot_summary')
+    if isinstance(ps, dict):
+        for candidate in ('text', 'summaryText', 'summary'):
+            tv = ps.get(candidate)
+            if isinstance(tv, str) and tv.strip():
+                return tv.strip()
+
+    return None
+
+
+def _extract_poster_from_obj(obj):
+    """
+    Extrai URL do poster/primaryImage/url etc.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # primaryImage.url
+    primary = obj.get('primaryImage')
+    if isinstance(primary, dict):
+        url = primary.get('url')
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+
+    # outras chaves que podem conter imagem
+    for key in ("poster", "image", "poster_url", "posterLink", "image_url"):
+        val = obj.get(key)
+        if isinstance(val, dict):
+            url = val.get('url')
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+        elif isinstance(val, str) and val.strip():
+            return val.strip()
+
+    return None
+
+
+# ======================================
+#  FUNÇÃO: BUSCA NA API IMDB (EXTRAI POSTER, PLOT E RATING)
+#  - tenta primeiro a resposta de search/titles
+#  - se não encontrar 'plot' faz fallback para titles/{id} para obter descrição detalhada
 # ======================================
 def get_imdb_data(titulo):
     try:
@@ -66,8 +140,6 @@ def get_imdb_data(titulo):
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-
-        print(data)  # Debug: ver a estrutura dos dados retornados
 
         # Normaliza para lista de títulos
         if isinstance(data, dict) and isinstance(data.get("titles"), list):
@@ -93,43 +165,42 @@ def get_imdb_data(titulo):
         if movie is None:
             return None
 
-        # Extrai a URL do poster (primaryImage.url preferencialmente)
-        poster = None
-        primary = movie.get("primaryImage")
-        if isinstance(primary, dict):
-            poster = primary.get("url")
+        # Extrai poster
+        poster = _extract_poster_from_obj(movie)
 
-        # campos alternativos caso não exista primaryImage
-        if not poster:
-            for key in ("poster", "image", "poster_url", "posterLink", "image_url"):
-                val = movie.get(key)
-                if isinstance(val, dict):
-                    poster = val.get("url")
-                elif isinstance(val, str) and val.strip():
-                    poster = val.strip()
-                if poster:
-                    break
+        # Extrai plot diretamente do objeto retornado pelo search (se houver)
+        plot = _extract_plot_from_obj(movie)
 
-        # Title / year / plot - adaptações aos nomes que a API pode devolver
+        # Se não encontrou plot, tenta consultar detalhes via titles/{id} (fallback)
+        if not plot:
+            movie_id = movie.get('id')
+            if movie_id:
+                try:
+                    detail_url = f"https://api.imdbapi.dev/titles/{movie_id}"
+                    resp2 = requests.get(detail_url, timeout=8)
+                    resp2.raise_for_status()
+                    detail_obj = resp2.json()
+                    # detail_obj pode ter 'plot', 'plots', 'plotSummary', etc.
+                    plot = _extract_plot_from_obj(detail_obj)
+                    # caso detail traga poster melhor
+                    if not poster:
+                        poster = _extract_poster_from_obj(detail_obj)
+                except Exception:
+                    # falha no detalhe não é crítica; mantemos plot como None
+                    pass
+
+        # Title / year
         title = movie.get("primaryTitle") or movie.get("title") or movie.get("originalTitle") or titulo
         year = movie.get("startYear") or movie.get("year")
-        plot = movie.get("plot") or movie.get("summary") or "Sem descrição disponível."
 
-        # Tenta extrair rating do IMDb (se presente)
+        # Tenta extrair rating do objeto
         imdb_rating = None
         imdb_votes = None
         rating_obj = movie.get("rating") or movie.get("ratings") or movie.get("aggregateRating")
         if isinstance(rating_obj, dict):
-            # possíveis chaves
             imdb_rating = rating_obj.get("aggregateRating") or rating_obj.get("average") or rating_obj.get("value")
             imdb_votes = rating_obj.get("voteCount") or rating_obj.get("votes") or rating_obj.get("count")
-        # às vezes vem como {'aggregateRating': X, 'voteCount': Y} aninhado sob 'rating' (amostra no prompt)
-        if imdb_rating is None and isinstance(movie.get("rating"), dict):
-            r = movie.get("rating")
-            imdb_rating = r.get("aggregateRating") or r.get("average") or r.get("value")
-            imdb_votes = r.get("voteCount") or r.get("votes") or r.get("count")
-
-        # Normaliza tipos
+        # Conversões seguras
         try:
             if imdb_rating is not None:
                 imdb_rating = float(imdb_rating)
@@ -145,7 +216,7 @@ def get_imdb_data(titulo):
             "title": title,
             "year": year,
             "poster": poster,
-            "plot": plot,
+            "plot": plot or "Sem descrição disponível.",
             "imdb_rating": imdb_rating,
             "imdb_votes": imdb_votes
         }
@@ -258,7 +329,7 @@ if st.button("Buscar recomendações"):
                     # Interno (dataset) rating
                     if stats_main is not None:
                         st.write(f"**Nota média (usuários da base):** {stats_main['avg_rating']} / 5 ({int(stats_main['num_ratings'])} avaliações)")
-                    # Plot
+                    # Plot / descrição
                     if info_main and info_main.get("plot"):
                         st.caption(info_main.get("plot"))
 
