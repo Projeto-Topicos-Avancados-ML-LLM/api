@@ -57,7 +57,7 @@ def build_model(filmes_pivot):
 
 
 # ======================================
-#  FUNÇÃO: BUSCA NA API IMDB (EXTRAI POSTER)
+#  FUNÇÃO: BUSCA NA API IMDB (EXTRAI POSTER E RATING)
 # ======================================
 def get_imdb_data(titulo):
     try:
@@ -66,6 +66,8 @@ def get_imdb_data(titulo):
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+
+        print(data)  # Debug: ver a estrutura dos dados retornados
 
         # Normaliza para lista de títulos
         if isinstance(data, dict) and isinstance(data.get("titles"), list):
@@ -113,11 +115,39 @@ def get_imdb_data(titulo):
         year = movie.get("startYear") or movie.get("year")
         plot = movie.get("plot") or movie.get("summary") or "Sem descrição disponível."
 
+        # Tenta extrair rating do IMDb (se presente)
+        imdb_rating = None
+        imdb_votes = None
+        rating_obj = movie.get("rating") or movie.get("ratings") or movie.get("aggregateRating")
+        if isinstance(rating_obj, dict):
+            # possíveis chaves
+            imdb_rating = rating_obj.get("aggregateRating") or rating_obj.get("average") or rating_obj.get("value")
+            imdb_votes = rating_obj.get("voteCount") or rating_obj.get("votes") or rating_obj.get("count")
+        # às vezes vem como {'aggregateRating': X, 'voteCount': Y} aninhado sob 'rating' (amostra no prompt)
+        if imdb_rating is None and isinstance(movie.get("rating"), dict):
+            r = movie.get("rating")
+            imdb_rating = r.get("aggregateRating") or r.get("average") or r.get("value")
+            imdb_votes = r.get("voteCount") or r.get("votes") or r.get("count")
+
+        # Normaliza tipos
+        try:
+            if imdb_rating is not None:
+                imdb_rating = float(imdb_rating)
+        except Exception:
+            imdb_rating = None
+        try:
+            if imdb_votes is not None:
+                imdb_votes = int(imdb_votes)
+        except Exception:
+            imdb_votes = None
+
         return {
             "title": title,
             "year": year,
             "poster": poster,
-            "plot": plot
+            "plot": plot,
+            "imdb_rating": imdb_rating,
+            "imdb_votes": imdb_votes
         }
     except Exception as e:
         st.error(f"Erro ao buscar dados do IMDb: {e}")
@@ -171,6 +201,11 @@ def find_best_title_match(query, titles, filmes_df):
 filmes, avaliacoes_e_filmes, filmes_pivot = load_data()
 modelo = build_model(filmes_pivot)
 
+# resumo das avaliações (do dataset ratings.csv, após merges) para mostrar notas/contagens internas
+ratings_summary = avaliacoes_e_filmes.groupby('TITULO')['AVALIACAO'].agg(['mean', 'count'])
+ratings_summary.rename(columns={'mean': 'avg_rating', 'count': 'num_ratings'}, inplace=True)
+ratings_summary['avg_rating'] = ratings_summary['avg_rating'].round(2)
+
 # ======================================
 #  INTERFACE STREAMLIT
 # ======================================
@@ -197,6 +232,37 @@ if st.button("Buscar recomendações"):
                 st.info(f"Usando correspondência encontrada: '{best_match}'")
 
             try:
+                # Mostra informações do filme pesquisado
+                info_main = get_imdb_data(best_match)
+                # busca stats internas
+                stats_main = None
+                if best_match in ratings_summary.index:
+                    stats_main = ratings_summary.loc[best_match]
+
+                st.subheader("Filme pesquisado")
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    if info_main and info_main.get("poster"):
+                        st.image(info_main["poster"], width=180)
+                    else:
+                        st.write("📷 Sem imagem")
+                with col2:
+                    title_str = info_main['title'] if info_main and info_main.get('title') else best_match
+                    year_str = f" ({info_main.get('year')})" if info_main and info_main.get('year') else ""
+                    st.markdown(f"### {title_str}{year_str}")
+                    # IMDb rating
+                    if info_main and info_main.get("imdb_rating") is not None:
+                        imdb_votes = info_main.get("imdb_votes")
+                        votes_text = f" ({imdb_votes} votos)" if imdb_votes else ""
+                        st.write(f"**Nota IMDb:** {info_main['imdb_rating']}{votes_text}")
+                    # Interno (dataset) rating
+                    if stats_main is not None:
+                        st.write(f"**Nota média (usuários da base):** {stats_main['avg_rating']} / 5 ({int(stats_main['num_ratings'])} avaliações)")
+                    # Plot
+                    if info_main and info_main.get("plot"):
+                        st.caption(info_main.get("plot"))
+
+                # Recomendados
                 query_vec = filmes_pivot.filter(items=[best_match], axis=0).values.reshape(1, -1)
                 distances, sugestions = modelo.kneighbors(query_vec, n_neighbors=6)
                 recommended = filmes_pivot.index[sugestions[0][1:]]
@@ -204,6 +270,9 @@ if st.button("Buscar recomendações"):
                 st.subheader("Filmes recomendados:")
                 for i, movie in enumerate(recommended, start=1):
                     info = get_imdb_data(movie)
+                    stats = None
+                    if movie in ratings_summary.index:
+                        stats = ratings_summary.loc[movie]
 
                     if info:
                         col1, col2 = st.columns([1, 3])
@@ -213,8 +282,20 @@ if st.button("Buscar recomendações"):
                             else:
                                 st.write("📷 Sem imagem")
                         with col2:
-                            st.markdown(f"### {i}. {info['title']} ({info.get('year', '')})")
-                            st.caption(info.get("plot", ""))
+                            title_str = info.get('title') or movie
+                            year_str = f" ({info.get('year')})" if info.get('year') else ""
+                            st.markdown(f"### {i}. {title_str}{year_str}")
+                            # IMDb rating
+                            if info.get("imdb_rating") is not None:
+                                imdb_votes = info.get("imdb_votes")
+                                votes_text = f" ({imdb_votes} votos)" if imdb_votes else ""
+                                st.write(f"**Nota IMDb:** {info['imdb_rating']}{votes_text}")
+                            # Interno (dataset) rating
+                            if stats is not None:
+                                st.write(f"**Nota média (usuários da base):** {stats['avg_rating']} / 5 ({int(stats['num_ratings'])} avaliações)")
+                            # Plot
+                            if info.get("plot"):
+                                st.caption(info.get("plot"))
                     else:
                         st.markdown(f"### {i}. {movie}")
 
