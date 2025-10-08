@@ -437,7 +437,7 @@ if st.session_state.get('run_recommendation', False) and st.session_state.get('b
                 else:
                     st.write("📷 Sem imagem")
 
-                st.caption(f"Distância: **{distances[0][i+1]:.4f}** (Menor é melhor)")
+                st.caption(f"Distância: **{distances[0][i+1]:.4f}**")
                 
                 if info and info.get("plot"):
                     st.markdown(f"*{info['plot'][:100]}...*")
